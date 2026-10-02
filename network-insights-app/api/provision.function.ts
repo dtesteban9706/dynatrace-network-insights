@@ -238,7 +238,12 @@ type ConfiguredDevicesInput = { action: 'configuredDevices' };
 type Input = AddInput | RetireInput | CatalogInput | DiscoverInput | AnomalyInput | ToggleInput | AgGroupsInput | CreateDetectorsInput | CredentialsInput | ConfiguredDevicesInput;
 
 // Network-relevant extension name fragments — used to filter the installed catalog.
-const NET_RX = /snmp|cisco|meraki|palo|fortinet|arista|juniper|f5|netflow|sflow|network/i;
+// fortigate: Dynatrace ships this as com.dynatrace.extension.fortigate (no "fortinet" in the
+// name, so the vendor keyword alone misses it). unifi/ubiquiti: for custom:ubiquiti-unifi and
+// any derivative. These are additive — removing any entry hides a vendor's configs from the
+// "monitored" diagnostic without hiding its metric data, which is the exact confusing shape
+// documented in docs/METRIC-CONTRACT.md §"The other rule: what you name your extension".
+const NET_RX = /snmp|cisco|meraki|palo|fortinet|fortigate|arista|juniper|f5|netflow|sflow|network|unifi|ubiquiti/i;
 
 export default async function (payload: Input | undefined = undefined) {
   const p = payload as Input;
@@ -392,7 +397,15 @@ async function configuredDevices() {
       const snmp = (v.snmp?.devices || []).map((d: any) => d.ip).filter(Boolean);
       const py = String(v.pythonRemote?.deviceList || '')
         .split(/[\n,]/).map((t: string) => t.trim().split(':')[0].trim()).filter(Boolean);
-      for (const ip of [...snmp, ...py]) {
+      // Vendor Python extensions (FortiGate, Meraki, UniFi, etc.) use pythonRemote.endpoints[]
+      // where each entry carries the device address as `host` or embedded in `url`. Without this
+      // path these devices read "not monitored" on the Fleet even when the configuration exists.
+      const endpoints = (v.pythonRemote?.endpoints || []).map((e: any) => {
+        if (e.host) return e.host;
+        if (e.url) { try { return new URL(e.url).hostname; } catch { return ''; } }
+        return '';
+      }).filter(Boolean);
+      for (const ip of [...snmp, ...py, ...endpoints]) {
         out.push({ ip, extension: ext, configId: it.objectId, description: v.description || '' });
       }
     }

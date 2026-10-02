@@ -56,10 +56,16 @@ export const Overview = () => {
   // worst first in the status strip: down (0) before unpolled (1) before up (2)
   const rank = (d: { monitored?: boolean; up?: boolean }) => (!d.monitored ? 1 : d.up ? 2 : 0);
   const s = (sum.data as any)?.records?.[0] ?? {};
+  // DQL summarize returns counts as STRINGS ("0", "42"), not numbers. The string "0" is truthy
+  // in JS, so a bare `s.checks ?` enters the division branch and computes 100 * "0" / "0" → NaN,
+  // which rendered as "NaN%" on a tenant with zero compliance logs. Coerce first.
+  const checks  = Number(s.checks)  || 0;
+  const passes  = Number(s.passes)  || 0;
+  const changes = Number(s.changes) || 0;
   // null, NOT 0. Zero checks means the compliance track was never set up — it does NOT mean the
   // fleet failed every control. Rendering "0%" in green claimed both at once, on the landing page,
   // to a customer whose only mistake was not having reached that setup step yet.
-  const pct = s.checks ? Math.round((100 * s.passes) / s.checks) : null;
+  const pct = checks ? Math.round((100 * passes) / checks) : null;
   const problems: any[] = davis.rows;
   const active = problems.filter((p) => p.status === "ACTIVE").length;
   // Prefer a currently-active problem for the "Active alerts" panel; fall back to the most
@@ -114,11 +120,11 @@ export const Overview = () => {
         {unmonitored ? (
           <StatTile label="Not monitored" value={unmonitored} sub="seen via LLDP · not polled" accent={t.subtle} />
         ) : null}
-        <StatTile label="Config changes (24h)" value={s.changes ?? 0}
-                  sub={s.checks ? "tracked with diff" : "not set up yet"}
-                  accent={s.changes ? t.warn : t.subtle} />
+        <StatTile label="Config changes (24h)" value={changes}
+                  sub={checks ? "tracked with diff" : "not set up yet"}
+                  accent={changes ? t.warn : t.subtle} />
         <StatTile label="ISO compliance" value={pct == null ? "—" : `${pct}%`}
-                  sub={pct == null ? "not set up yet" : `${s.checks} checks`}
+                  sub={pct == null ? "not set up yet" : `${checks} checks`}
                   accent={pct == null ? t.subtle : pct >= 90 ? t.up : pct >= 70 ? t.warn : t.down} />
       </Flex>
 

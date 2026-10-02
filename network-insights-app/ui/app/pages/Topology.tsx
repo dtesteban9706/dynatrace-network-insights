@@ -47,6 +47,11 @@ const THROUGHPUT_Q = `timeseries inb=max(cno.if.in_octets.count), outb=max(cno.i
 
 const W = 1000, H = 600, R = 22;
 const TIERY: Record<string, number> = { "wan-edge": 70, core: 210, access: 350, ap: 490, console: 490, other: 350 };
+// A tier with more nodes than this wraps onto multiple rows so they do not pile on top of
+// each other. 15 at R=22 across the 880px span gives ~55px per node — enough gap to read labels
+// without the ring overlap seen on big fleets (observed with 65 FortiGate branches on one tier).
+const MAX_PER_ROW = 15;
+const ROW_H = 70; // vertical offset per extra row within a tier
 
 export const Topology = () => {
   const nav = useNavigate();
@@ -146,24 +151,41 @@ export const Topology = () => {
      failure. Rungs that exist keep their ORDER; the ladder just gets shorter. */
   const TIER_ORDER = ["wan-edge", "core", "access", "other", "ap", "console"];
   const occupied = TIER_ORDER.filter((r) => (tierMembers[r] || []).length);
+  // Rows each tier will occupy once wrapped. The vertical layout accounts for this so a
+  // crowded wan-edge does not visually crash into the tier below it.
+  const rowsOf = (r: string) => Math.max(1, Math.ceil((tierMembers[r] || []).length / MAX_PER_ROW));
   const yOf: Record<string, number> = {};
   if (occupied.length === 1) {
     yOf[occupied[0]] = 280;
   } else {
-    const top = 70, bottom = Math.min(490, 70 + (occupied.length - 1) * 140);
-    occupied.forEach((r, i) => { yOf[r] = top + ((bottom - top) * i) / (occupied.length - 1); });
+    const top = 70;
+    let cursor = top;
+    occupied.forEach((r, i) => {
+      yOf[r] = cursor;
+      cursor += rowsOf(r) * ROW_H + (i < occupied.length - 1 ? 60 : 0); // tier gap only between tiers
+    });
   }
   const pos: Record<string, { x: number; y: number }> = {};
-  const byY: Record<number, string[]> = {};
-  Object.keys(tierMembers).forEach((r) => tierMembers[r].forEach((n) => {
-    const y = yOf[r] ?? TIERY[r] ?? 350;
-    (byY[y] = byY[y] || []).push(n);
-  }));
-  Object.keys(byY).forEach((yk) => {
-    const arr = byY[+yk].sort();
-    const span = 560;
-    arr.forEach((n, i) => { pos[n] = { x: arr.length === 1 ? 320 : 90 + (span * i) / (arr.length - 1), y: +yk }; });
+  // One wrap-aware layout per tier (not per base-Y, because wrapping produces several Y bands
+  // within a tier). Keyed on tier, not on yOf[r], so power nodes added later cannot collide.
+  Object.keys(tierMembers).forEach((r) => {
+    const arr = tierMembers[r].slice().sort();
+    const tierY = yOf[r] ?? TIERY[r] ?? 350;
+    const span = 880; // widened from 560 so even full rows have breathing room
+    const rows = Math.ceil(arr.length / MAX_PER_ROW);
+    arr.forEach((n, i) => {
+      const row = Math.floor(i / MAX_PER_ROW);
+      // Last row can be short; distribute whichever count it actually has across the span.
+      const rowStart = row * MAX_PER_ROW;
+      const rowCount = Math.min(MAX_PER_ROW, arr.length - rowStart);
+      const col = i - rowStart;
+      const x = rowCount === 1 ? W / 2 : 60 + (span * col) / (rowCount - 1);
+      const y = tierY + row * ROW_H;
+      pos[n] = { x, y };
+    });
   });
+  // Dynamic viewBox height — the fixed H=600 clipped the bottom tier when a tier wrapped.
+  const maxY = Math.max(H, ...Object.values(pos).map(p => p.y + R + 40), 600);
   powerNodes.sort().forEach((n, i) => { pos[n] = { x: 910, y: 250 + i * 150 }; });
 
   // WAN uplinks: cross-site edges touching this site (branch SDWAN <-> HQ hub). The per-site view
@@ -182,6 +204,10 @@ export const Topology = () => {
 
   // pan + zoom on the clean SVG (buttons + drag) — keeps the mockup look, restores controls
   const [view, setView] = useState({ s: 1, x: 0, y: 0 });
+  // Label visibility toggles. Device-name and IP each have their own switch so an operator can
+  // trade a dense fleet for readability without zooming.
+  const [showNames, setShowNames] = useState(true);
+  const [showIps, setShowIps] = useState(true);
   const drag = useRef<{ sx: number; sy: number; ox: number; oy: number } | null>(null);
   const zoom = (f: number) => setView((v) => ({ ...v, s: Math.min(4, Math.max(0.4, v.s * f)) }));
   const onDown = (e: React.MouseEvent) => { drag.current = { sx: e.clientX, sy: e.clientY, ox: view.x, oy: view.y }; };
@@ -221,14 +247,23 @@ export const Topology = () => {
         ) : names.size === 0 ? (
           <Text style={{ color: t.subtle }}>No devices in this view.</Text>
         ) : (
-          <div style={{ position: "relative", maxWidth: 940, margin: "0 auto" }}>
-            <div style={{ position: "absolute", top: 8, right: 8, display: "flex", gap: 6, zIndex: 2 }}>
+          <div style={{ position: "relative", width: "100%", margin: "0 auto" }}>
+            <div style={{ position: "absolute", top: 8, right: 8, display: "flex", gap: 10, zIndex: 2, alignItems: "center",
+                          background: t.card, border: `1px solid ${t.border}`, borderRadius: 7, padding: "4px 8px" }}>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: t.ink, cursor: "pointer", userSelect: "none" }}>
+                <input type="checkbox" checked={showNames} onChange={(e) => setShowNames(e.target.checked)} />
+                names
+              </label>
+              <label style={{ display: "flex", alignItems: "center", gap: 4, fontSize: 12, color: t.ink, cursor: "pointer", userSelect: "none" }}>
+                <input type="checkbox" checked={showIps} onChange={(e) => setShowIps(e.target.checked)} />
+                IPs
+              </label>
               <button aria-label="Zoom in" onClick={() => zoom(1.2)} style={btn}>+</button>
               <button aria-label="Zoom out" onClick={() => zoom(1 / 1.2)} style={btn}>−</button>
               <button aria-label="Reset view" onClick={() => setView({ s: 1, x: 0, y: 0 })} style={btn}>⟲</button>
             </div>
             <svg
-              viewBox={`0 0 ${W} ${H}`}
+              viewBox={`0 0 ${W} ${maxY}`}
               width="100%"
               role="img"
               aria-label="Network topology"
@@ -297,8 +332,8 @@ export const Topology = () => {
                     <circle cx={p.x} cy={p.y} r={R} style={{ fill: t.card, stroke: c }} strokeWidth={2.5}
                             strokeDasharray={st === "unmonitored" ? "3 3" : undefined} />
                     <text x={p.x} y={p.y + 4} textAnchor="middle" style={{ fill: t.subtle, fontSize: 10, fontWeight: 700, fontFamily: "ui-monospace, monospace" }}>{glyph(roleFn(n))}</text>
-                    <text x={p.x} y={p.y + R + 16} textAnchor="middle" style={{ fill: t.ink, fontSize: 12, fontWeight: 600, fontFamily: "ui-monospace, monospace" }}>{labelFor(n).replace("LAB-", "")}</text>
-                    {labelFor(n) !== n ? <text x={p.x} y={p.y + R + 30} textAnchor="middle" style={{ fill: t.subtle, fontSize: 10, fontFamily: "ui-monospace, monospace" }}>{n}</text> : null}
+                    {showNames ? <text x={p.x} y={p.y + R + 16} textAnchor="middle" style={{ fill: t.ink, fontSize: 12, fontWeight: 600, fontFamily: "ui-monospace, monospace" }}>{labelFor(n).replace("LAB-", "")}</text> : null}
+                    {showIps && labelFor(n) !== n ? <text x={p.x} y={p.y + R + (showNames ? 30 : 16)} textAnchor="middle" style={{ fill: t.subtle, fontSize: 10, fontFamily: "ui-monospace, monospace" }}>{n}</text> : null}
                   </g>
                 );
               })}
